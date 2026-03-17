@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BulgasariCharacter.h"
 #include "Camera/BgrTopDownCamera.h"
@@ -131,23 +131,35 @@ void ABulgasariCharacter::Tick(float DeltaTime)
 		SetActorRotation(Direction.Rotation());
 	}
 
-	// 대쉬 이동
+	// 쿨다운 감소
+	if (DashCooldownRemaining > 0.f)
+	{
+		DashCooldownRemaining -= DeltaTime;
+	}
+
+	// 대쉬 이동 — Cubic Ease-Out: 시작 폭발적, 끝에서 쫙 감속
 	if (bIsDashing)
 	{
-		FVector NewLocation = FMath::VInterpConstantTo(GetActorLocation(), DashTargetLocation, DeltaTime, DashSpeed);
-		SetActorLocation(NewLocation, true);
+		DashElapsed += DeltaTime;
+		const float Alpha = FMath::Clamp(DashElapsed / DashDuration, 0.f, 1.f);
 
-		if (FVector::Dist(GetActorLocation(), DashTargetLocation) < 5.f)
+		// 1 - (1 - t)^3 : 초반 빠르게 치고 나가다 끝에서 부드럽게 제동
+		const float EasedAlpha = 1.f - FMath::Pow(1.f - Alpha, 3.f);
+
+		SetActorLocation(FMath::Lerp(DashStartLocation, DashTargetLocation, EasedAlpha), true);
+
+		if (Alpha >= 1.f)
 		{
 			bIsDashing = false;
+			DashElapsed = 0.f;
+			DashCooldownRemaining = DashCooldown;
 		}
 	}
 }
 
 void ABulgasariCharacter::Dash(const FInputActionValue& Value)
 {
-	if (bIsDashing) return;
-	
+	if (bIsDashing || DashCooldownRemaining > 0.f) return;
 
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC) return;
@@ -156,7 +168,6 @@ void ABulgasariCharacter::Dash(const FInputActionValue& Value)
 	PC->GetHitResultUnderCursor(ECC_Visibility, false, CursorHit);
 	if (!CursorHit.bBlockingHit) return;
 
-	bIsDashing = true;
 	// 클릭 위치를 캐릭터와 같은 Z로 맞춤
 	FVector ToTarget = CursorHit.Location - GetActorLocation();
 	ToTarget.Z = 0.f;
@@ -188,8 +199,10 @@ void ABulgasariCharacter::Dash(const FInputActionValue& Value)
 		QueryParams  
 	);
 
+	DashStartLocation = GetActorLocation();
 	DashTargetLocation = bBlocked ? SweepHit.Location : RawTarget;
-	
+	DashElapsed = 0.f;
+	bIsDashing = true;
 }
 
 void ABulgasariCharacter::Shoot(const FInputActionValue& Value)
