@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
@@ -64,12 +64,19 @@ class ABulgasariCharacter : public ACharacter
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Combat, meta = (AllowPrivateAccess = "true"))
 	float MaxDashDistance = 600.f;
 
-	/** 대쉬 이동 속도 (units/sec) */
+	/** 대쉬 총 소요 시간 (초) — 짧을수록 폭발적인 느낌 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Combat, meta = (AllowPrivateAccess = "true"))
-	float DashSpeed = 4000.f;
+	float DashDuration = 0.18f;
+
+	/** 대쉬 쿨다운 (초) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Combat, meta = (AllowPrivateAccess = "true"))
+	float DashCooldown = 0.6f;
 
 	bool bIsDashing = false;
+	FVector DashStartLocation;
 	FVector DashTargetLocation;
+	float DashElapsed = 0.f;
+	float DashCooldownRemaining = 0.f;
 
 public:
 	ABulgasariCharacter();
