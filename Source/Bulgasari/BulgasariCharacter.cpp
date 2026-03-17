@@ -1,12 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BulgasariCharacter.h"
+#include "Camera/BgrTopDownCamera.h"
+#include "Projectile/BgrProjectile.h"
 #include "Engine/LocalPlayer.h"
-#include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/Controller.h"
+#include "GameFramework/PlayerController.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
@@ -18,46 +20,56 @@ DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
 ABulgasariCharacter::ABulgasariCharacter()
 {
-	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
-		
-	// Don't rotate when the controller rotates. Let that just affect the camera.
+
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationYaw = false;
 	bUseControllerRotationRoll = false;
 
-	// Configure character movement
-	GetCharacterMovement()->bOrientRotationToMovement = true; // Character moves in the direction of input...	
-	GetCharacterMovement()->RotationRate = FRotator(0.0f, 500.0f, 0.0f); // ...at this rotation rate
+	PrimaryActorTick.bCanEverTick = true;
 
-	// Note: For faster iteration times these variables, and many more, can be tweaked in the Character Blueprint
-	// instead of recompiling to adjust them
-	GetCharacterMovement()->JumpZVelocity = 700.f;
-	GetCharacterMovement()->AirControl = 0.35f;
-	GetCharacterMovement()->MaxWalkSpeed = 500.f;
-	GetCharacterMovement()->MinAnalogWalkSpeed = 20.f;
-	GetCharacterMovement()->BrakingDecelerationWalking = 2000.f;
-	GetCharacterMovement()->BrakingDecelerationFalling = 1500.0f;
+	GetCharacterMovement()->GravityScale = 0.f;
+	GetCharacterMovement()->bOrientRotationToMovement = false;
+	GetCharacterMovement()->RotationRate = FRotator(0.0f, 500.0f, 0.0f);
+	GetCharacterMovement()->MaxFlySpeed = 500.f;
+	GetCharacterMovement()->MaxAcceleration = 10000.f;    // 기본 2048, 높을수록 즉시 가속
+	GetCharacterMovement()->BrakingDecelerationFlying = 10000.f; // 높을수록 즉시 정지
 
-	// Create a camera boom (pulls in towards the player if there is a collision)
-	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
-	CameraBoom->SetupAttachment(RootComponent);
-	CameraBoom->TargetArmLength = 400.0f; // The camera follows at this distance behind the character	
-	CameraBoom->bUsePawnControlRotation = true; // Rotate the arm based on the controller
+	// 비주얼 메시 (Blueprint에서 Static Mesh 지정)
+	BodyMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("BodyMesh"));
+	BodyMesh->SetupAttachment(RootComponent);
 
-	// Create a follow camera
-	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
-	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName); // Attach the camera to the end of the boom and let the boom adjust to match the controller orientation
-	FollowCamera->bUsePawnControlRotation = false; // Camera does not rotate relative to arm
-
-	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character) 
-	// are set in the derived blueprint asset named ThirdPersonCharacter (to avoid direct content references in C++)
+	// 기본 SkeletalMesh 숨김
+	GetMesh()->SetVisibility(false);
 }
 
 void ABulgasariCharacter::BeginPlay()
 {
-	// Call the base class  
 	Super::BeginPlay();
+
+	// 중력 없이 공중에 부유
+	GetCharacterMovement()->SetMovementMode(MOVE_Flying);
+
+	// 초기 마우스 보간 위치를 캐릭터 전방으로 설정
+	PrevMouseVector = GetActorLocation() + GetActorForwardVector() * 100.f;
+
+	// 탑뷰 카메라 스폰 후 뷰 타겟으로 설정
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	TopDownCamera = GetWorld()->SpawnActor<ATopDownCamera>(ATopDownCamera::StaticClass(), GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
+	if (TopDownCamera)
+	{
+		TopDownCamera->TargetActor = this;
+
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			PC->SetViewTarget(TopDownCamera);
+			PC->bShowMouseCursor = true; // 커서 설정0
+		}
+	}
+	
+	
+	
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -84,13 +96,111 @@ void ABulgasariCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 		// Moving
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ABulgasariCharacter::Move);
 
-		// Looking
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &ABulgasariCharacter::Look);
+		// Shooting
+		EnhancedInputComponent->BindAction(ShootAction, ETriggerEvent::Started, this, &ABulgasariCharacter::Shoot);
+
+		// Dashing
+		EnhancedInputComponent->BindAction(DashAction, ETriggerEvent::Started, this, &ABulgasariCharacter::Dash);
 	}
 	else
 	{
 		UE_LOG(LogTemplateCharacter, Error, TEXT("'%s' Failed to find an Enhanced Input component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
 	}
+}
+
+void ABulgasariCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// 마우스 커서 방향으로 캐릭터 회전
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC) return;
+
+	FHitResult HitResult;
+	PC->GetHitResultUnderCursor(ECC_Visibility, false, HitResult);
+	if (!HitResult.bBlockingHit) return;
+
+	// 이전 위치에서 현재 마우스 위치로 보간 → 부드러운 회전
+	PrevMouseVector = FMath::VInterpTo(PrevMouseVector, HitResult.Location, DeltaTime, MouseRotationInterpSpeed);
+
+	FVector Direction = PrevMouseVector - GetActorLocation();
+	Direction.Z = 0.f;
+
+	if (!Direction.IsNearlyZero())
+	{
+		SetActorRotation(Direction.Rotation());
+	}
+
+	// 대쉬 이동
+	if (bIsDashing)
+	{
+		FVector NewLocation = FMath::VInterpConstantTo(GetActorLocation(), DashTargetLocation, DeltaTime, DashSpeed);
+		SetActorLocation(NewLocation, true);
+
+		if (FVector::Dist(GetActorLocation(), DashTargetLocation) < 5.f)
+		{
+			bIsDashing = false;
+		}
+	}
+}
+
+void ABulgasariCharacter::Dash(const FInputActionValue& Value)
+{
+	if (bIsDashing) return;
+	
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC) return;
+
+	FHitResult CursorHit;
+	PC->GetHitResultUnderCursor(ECC_Visibility, false, CursorHit);
+	if (!CursorHit.bBlockingHit) return;
+
+	bIsDashing = true;
+	// 클릭 위치를 캐릭터와 같은 Z로 맞춤
+	FVector ToTarget = CursorHit.Location - GetActorLocation();
+	ToTarget.Z = 0.f;
+
+	
+	ToTarget = ToTarget.GetSafeNormal() * MaxDashDistance;
+	
+	
+
+	FVector RawTarget = GetActorLocation() + ToTarget;
+
+	// 캡슐 스윕으로 막힌 지점 감지
+	FHitResult SweepHit;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(
+		GetCapsuleComponent()->GetScaledCapsuleRadius(),
+		GetCapsuleComponent()->GetScaledCapsuleHalfHeight()
+	);
+	bool bBlocked = GetWorld()->SweepSingleByChannel(
+		SweepHit,
+		GetActorLocation(),
+		RawTarget,
+		FQuat::Identity,
+		ECC_Pawn,
+		CapsuleShape,
+		QueryParams  
+	);
+
+	DashTargetLocation = bBlocked ? SweepHit.Location : RawTarget;
+	
+}
+
+void ABulgasariCharacter::Shoot(const FInputActionValue& Value)
+{
+	if (!ProjectileClass) return;
+
+	FVector Direction = GetActorForwardVector();
+	FVector SpawnLocation = GetActorLocation() + Direction * 60.f;
+	FRotator SpawnRotation = Direction.Rotation();
+
+	GetWorld()->SpawnActor<ABgrProjectile>(ProjectileClass, SpawnLocation, SpawnRotation);
 }
 
 void ABulgasariCharacter::Move(const FInputActionValue& Value)
@@ -109,22 +219,10 @@ void ABulgasariCharacter::Move(const FInputActionValue& Value)
 	
 		// get right vector 
 		const FVector RightDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
-
+		
 		// add movement 
 		AddMovementInput(ForwardDirection, MovementVector.Y);
 		AddMovementInput(RightDirection, MovementVector.X);
 	}
 }
 
-void ABulgasariCharacter::Look(const FInputActionValue& Value)
-{
-	// input is a Vector2D
-	FVector2D LookAxisVector = Value.Get<FVector2D>();
-
-	if (Controller != nullptr)
-	{
-		// add yaw and pitch input to controller
-		AddControllerYawInput(LookAxisVector.X);
-		AddControllerPitchInput(LookAxisVector.Y);
-	}
-}
