@@ -213,7 +213,11 @@ void ABulgasariCharacter::Shoot(const FInputActionValue& Value)
 	FVector SpawnLocation = GetActorLocation() + Direction * 60.f;
 	FRotator SpawnRotation = Direction.Rotation();
 
-	GetWorld()->SpawnActor<ABgrProjectile>(ProjectileClass, SpawnLocation, SpawnRotation);
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = this;
+
+	GetWorld()->SpawnActor<ABgrProjectile>(ProjectileClass, SpawnLocation, SpawnRotation, SpawnParams);
 }
 
 void ABulgasariCharacter::Move(const FInputActionValue& Value)
