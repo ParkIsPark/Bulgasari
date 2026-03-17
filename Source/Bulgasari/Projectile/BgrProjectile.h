@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
@@ -16,6 +16,8 @@ public:
 	ABgrProjectile();
 
 protected:
+	virtual void BeginPlay() override;
+
 	UPROPERTY(VisibleAnywhere, Category = "Projectile")
 	TObjectPtr<USphereComponent> CollisionComp;
 
